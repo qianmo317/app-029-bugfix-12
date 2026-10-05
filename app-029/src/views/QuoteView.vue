@@ -163,10 +163,11 @@ function toCsv(): void {
             <span class="muted">对齐</span><span>{{ alignLabel(project.layout.settings.align) }}</span>
             <span class="muted">排版</span><span class="mono">{{ doc.layoutText }}</span>
             <span class="muted">LED</span>
-            <span class="mono">
+            <span class="mono" v-if="bom.panelMaterial.useLed">
               布点 {{ bom.led.perimeterTotalMm }}mm · 模组 {{ bom.led.modules }} 只 · 额定 {{ bom.led.ratedW }}W · 电源
               {{ bom.led.suggestedPsu }}
             </span>
+            <span class="muted" v-else>不发光材质（{{ bom.panelMaterial.name }}）：不计 LED 模组与电源</span>
             <span class="muted">亚克力</span>
             <span class="mono">{{ bom.sheet.spec }} · {{ bom.nesting.sheetCount }} 张 · 利用率 {{ (bom.nesting.utilization * 100).toFixed(1) }}%</span>
           </div>

@@ -107,8 +107,82 @@ export interface BomOptions {
   acknowledgeThinStroke?: boolean
 }
 
-function ruleQty(rule: RuleSpec, ctx: { areaM2: number; chars: number; perimeterM: number; psu: number; modules: number; blocks: number; outlinePerimeterM: number }): number {
-  return Math.max(rule.minQty, ctx.chars * rule.value)
+/**
+ * 用量规则取值（规格书第 4.6 节）：
+ * - 每一项必须按自己的计量口径取值，不能一律跟着字数走；
+ * - 毛用量 = 计量基数 × 系数 value；
+ * - 起订量 minQty：毛用量不足时按 minQty 计（系数 value 为 0 时同样适用）；
+ * - 用量为 0 且无起订量（minQty = 0）→ 不计该项（不进明细）；
+ * - 整件采购单位（支/套/个/台…）数量必须向上取整，绝不出现小数件数；
+ *   米、㎡、字 等按用量折算的单位保留小数，金额按未取整的真实用量折算，
+ *   因此「各分项金额之和 = 合计」恒成立。
+ */
+export interface RuleContext {
+  areaM2: number
+  chars: number
+  perimeterM: number
+  psu: number
+  modules: number
+  blocks: number
+  outlinePerimeterM: number
+}
+
+/** 整件采购、只能整件买卖的单位：数量一律向上取整 */
+const PIECE_UNITS = new Set(['支', '套', '个', '台', '只', '张', '根', '瓶', '盒', '包'])
+
+export function isPieceUnit(unit: string): boolean {
+  return PIECE_UNITS.has(unit)
+}
+
+/** 按规则类型取毛用量（未取整） */
+function rawRuleQty(rule: RuleSpec, ctx: RuleContext): number {
+  const base =
+    rule.type === 'perPieceAreaM2'
+      ? ctx.areaM2
+      : rule.type === 'perChar'
+        ? ctx.chars
+        : rule.type === 'perMeterPerimeter'
+          ? ctx.perimeterM
+          : rule.type === 'perPsu'
+            ? ctx.psu
+            : rule.type === 'perModule'
+              ? ctx.modules
+              : rule.type === 'perStrokeBlock'
+                ? ctx.blocks
+                : ctx.outlinePerimeterM
+  return base * rule.value
+}
+
+/**
+ * 按规则计算明细数量：
+ * 1) 毛用量 = 基数 × 系数；系数为 0 → 毛用量 0；
+ * 2) 与起订量取大（Math.max）；
+ * 3) 整件单位向上取整，其余单位保留小数（按用量折算）；
+ * 4) 结果为 0 → 该项不计（返回 0，由调用方跳过）。
+ */
+export function ruleQuantity(rule: RuleSpec, unit: string, ctx: RuleContext): number {
+  const withMin = Math.max(rule.minQty || 0, rawRuleQty(rule, ctx))
+  if (withMin <= 0) return 0
+  return isPieceUnit(unit) ? Math.ceil(withMin - 1e-9) : withMin
+}
+
+/**
+ * 金额折算：整件单位按取整后件数计价；折算单位按未取整毛用量（套用起订量后）计价，
+ * 再四舍五入到整数「分」。返回 { qty, amountCents }，qty 为 0 表示该项不计。
+ */
+function priceRuleItem(rule: RuleSpec, unit: string, unitPriceCents: number, ctx: RuleContext): { qty: number; amountCents: number } {
+  const withMin = Math.max(rule.minQty || 0, rawRuleQty(rule, ctx))
+  if (withMin <= 0) return { qty: 0, amountCents: 0 }
+  if (isPieceUnit(unit)) {
+    const qty = Math.ceil(withMin - 1e-9)
+    return { qty, amountCents: qty * unitPriceCents }
+  }
+  return { qty: withMin, amountCents: Math.round(withMin * unitPriceCents) }
+}
+
+/** 明细数量显示：整件单位为整数；折算单位保留至多 3 位小数 */
+export function formatQty(qty: number, piece: boolean): string {
+  return piece ? String(qty) : String(Math.round(qty * 1000) / 1000)
 }
 
 /** 拆料件：每个连通域（笔画块）一件，按外接矩形计 */
@@ -190,10 +264,9 @@ export function buildBom(project: Project, layout: LayoutResult, preset: Preset,
       amountCents: led.psuCount * psuUnitPrice
     })
   }
-  // 4) 胶与配件与加工费
-  for (const c of [...preset.consumables, ...preset.labor]) {
-    if (c.id === 'trim') continue
-    const qty = Math.round(ruleQty(c.rule, ctx) * 100) / 100
+  // 4) 胶与配件（按各自计量口径取值；包边条仅描边/镂空字计）
+  for (const c of preset.consumables) {
+    const { qty, amountCents } = priceRuleItem(c.rule, c.unit, c.unitPriceCents, ctx)
     if (qty <= 0) continue
     materials.push({
       kind: 'glue',
@@ -201,7 +274,22 @@ export function buildBom(project: Project, layout: LayoutResult, preset: Preset,
       qty,
       unit: c.unit,
       unitPriceCents: c.unitPriceCents,
-      amountCents: Math.round(qty * c.unitPriceCents)
+      amountCents
+    })
+  }
+  // 5) 加工费（与「胶与配件」分组分开；不发光材质不计 LED 布点与电源装配）
+  for (const l of preset.labor) {
+    // LED 布点安装、电源装配只有发光方案才计
+    if (!panelMaterial.useLed && (l.id === 'ledmount' || l.id === 'psuinstall')) continue
+    const { qty, amountCents } = priceRuleItem(l.rule, l.unit, l.unitPriceCents, ctx)
+    if (qty <= 0) continue
+    materials.push({
+      kind: 'labor',
+      spec: l.spec,
+      qty,
+      unit: l.unit,
+      unitPriceCents: l.unitPriceCents,
+      amountCents
     })
   }
 
@@ -229,13 +317,16 @@ export function buildBom(project: Project, layout: LayoutResult, preset: Preset,
   }
 }
 
-/** 断言：Σ 材料金额 = 合计，且金额均为整数分 */
+/** 断言：Σ 材料金额 = 合计，金额均为整数分，且整件单位不出现小数件数 */
 export function assertBomSum(bom: BomResult): { ok: boolean; message: string } {
   const sum = bom.materials.reduce((s, m) => s + m.amountCents, 0)
   const allInt = bom.materials.every((m) => Number.isInteger(m.amountCents))
+  const noFractionalPieces = bom.materials.every((m) => !isPieceUnit(m.unit) || Number.isInteger(m.qty))
+  const ok = sum === bom.totalCents && allInt && noFractionalPieces
+  const tail = noFractionalPieces ? '通过' : '失败（存在小数件数）'
   return {
-    ok: sum === bom.totalCents && allInt,
-    message: `Σ 明细 = ${sum} 分，合计 = ${bom.totalCents} 分；整数分校验：${allInt ? '通过' : '失败'}`
+    ok,
+    message: `Σ 明细 = ${sum} 分，合计 = ${bom.totalCents} 分；整数分校验：${allInt ? '通过' : '失败'}；整件取整校验：${tail}`
   }
 }
 

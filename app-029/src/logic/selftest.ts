@@ -7,7 +7,7 @@ import testchars from '../data/testchars.json'
 import { computeLed } from './led'
 import { clearGeometryCache, ensureFont, findFont, getGlyphGeom } from './fontLoader'
 import { computeLayout, defaultProject, textToItems, type LayoutResult } from './layout'
-import { assertBomSum, buildBom, compareMaterials, defaultPreset, type Preset } from './materials'
+import { assertBomSum, buildBom, compareMaterials, defaultPreset, ruleQuantity, type Preset } from './materials'
 import { nestPieces, type Piece } from './nesting'
 import { runBlockCount, type BlockCountResult } from './testRunner'
 import type { LayoutDef, Project } from './types'
@@ -375,6 +375,100 @@ export async function runAcceptance(preset: Preset = defaultPreset): Promise<Acc
       pass: cmp.every((c) => c.totalCents === c.panelCents + c.ledCents + c.psuCents + c.accessoryCents + c.laborCents),
       detail: `${cmp.length} 种材质`,
       evidence: cmp.map((c) => `${c.name}：面板 ${(c.panelCents / 100).toFixed(2)} + LED ${(c.ledCents / 100).toFixed(2)} + 电源 ${(c.psuCents / 100).toFixed(2)} + 配件 ${(c.accessoryCents / 100).toFixed(2)} + 加工 ${(c.laborCents / 100).toFixed(2)} = ¥${(c.totalCents / 100).toFixed(2)}`)
+    })
+  }
+
+  // ---------- 11. 材料清单计量口径、整件取整、起订量、材质剔除与分组 ----------
+  {
+    const ev: string[] = []
+    let pass = true
+    const fail = (msg: string): void => {
+      pass = false
+      ev.push(`✗ ${msg}`)
+    }
+    const pieceUnits = new Set(['支', '套', '个', '台', '只', '张'])
+
+    const p = makeProject('acc11', '广告招牌制作', 300)
+    const lay: LayoutResult = computeLayout(p.layout, { autoSize: true })
+
+    // 发光材质（默认亚克力发光字）
+    const ledBom = buildBom(p, lay, preset)
+    const findRow = (bom: ReturnType<typeof buildBom>, idOrPart: string) =>
+      bom.materials.find((m) => m.kind !== 'acrylic' && m.kind !== 'led_module' && m.kind !== 'psu' && m.spec.includes(idOrPart))
+    const glueSpec = preset.consumables.find((c) => c.id === 'glue')!.spec
+    const wireSpec = preset.consumables.find((c) => c.id === 'wire')!.spec
+    const trimSpec = preset.consumables.find((c) => c.id === 'trim')!.spec
+    const cutSpec = preset.labor.find((l) => l.id === 'cut')!.spec
+    const ledMountSpec = preset.labor.find((l) => l.id === 'ledmount')!.spec
+    const psuInstallSpec = preset.labor.find((l) => l.id === 'psuinstall')!.spec
+
+    // ① 各项按自己的计量口径取值（不再跟着字数走）：
+    //    电源线按周长折算（米，小数）；结构胶按笔画块折算后整件向上取整（支）
+    const wire = findRow(ledBom, wireSpec)
+    const perimeterMBom =
+      lay.chars.reduce((s, c) => s + c.geom.outerPerimeter * (c.geom.inkW > 0 ? c.inkW / c.geom.inkW : 0), 0) / 1000
+    const expectWireM = perimeterMBom * 0.35
+    if (!wire || wire.unit !== '米' || Math.abs(wire.qty - expectWireM) > 1e-6) fail(`电源线应按周长 ${expectWireM.toFixed(3)} 米折算，实得 ${wire?.qty}`)
+    else ev.push(`电源线按外轮廓周长折算：${(perimeterMBom * 1000).toFixed(0)}mm × 0.35 = ${wire.qty} 米（非字数）✓`)
+    const glue = findRow(ledBom, glueSpec)
+    const expectGlue = Math.max(1, Math.ceil(lay.chars.reduce((s, c) => s + c.geom.strokeBlocks, 0) * 0.035 - 1e-9))
+    if (!glue || glue.unit !== '支' || glue.qty !== expectGlue || !Number.isInteger(glue.qty)) fail(`结构胶应为整数支 ${expectGlue}，实得 ${glue?.qty}`)
+    else ev.push(`结构胶按笔画块折算并向上取整：${glue.qty} 支（无小数件）✓`)
+    // 切割费按料件面积（㎡）折算
+    const cut = ledBom.materials.find((m) => m.spec === cutSpec)
+    if (!cut || Math.abs(cut.qty - ledBom.pieceAreaM2) > 1e-9) fail(`切割费应按料件面积 ${ledBom.pieceAreaM2} ㎡ 折算，实得 ${cut?.qty}`)
+    else ev.push(`切割费按料件面积折算：${cut.qty} ㎡，金额 ${cut.amountCents} 分 ✓`)
+
+    // ② 所有整件单位（支/套/个/台/只/张）数量必须为整数
+    const fractional = ledBom.materials.filter((m) => pieceUnits.has(m.unit) && !Number.isInteger(m.qty))
+    if (fractional.length) fail(`存在小数件数：${fractional.map((m) => `${m.spec}×${m.qty}${m.unit}`).join('；')}`)
+    else ev.push('整件单位（支/套/个/台/只/张）数量全部为整数 ✓')
+
+    // ③ 不发光材质：无 LED 模组/电源材料，也无布点安装/电源装配费；加工费独立分组
+    const pNoLed = makeProject('acc11b', '广告招牌制作', 300)
+    pNoLed.panelMaterialId = 'pvc'
+    const noLedBom = buildBom(pNoLed, lay, preset)
+    if (noLedBom.materials.some((m) => m.kind === 'led_module' || m.kind === 'psu')) fail('PVC 方案出现 LED 模组/电源条目')
+    else ev.push('PVC 不发光材质：无 LED 模组与电源材料 ✓')
+    if (noLedBom.materials.some((m) => m.spec === ledMountSpec || m.spec === psuInstallSpec)) fail('PVC 方案计了 LED 布点安装/电源装配费')
+    else ev.push('PVC 不发光材质：已剔除 LED 布点安装费与电源装配费 ✓')
+    const laborRows = ledBom.materials.filter((m) => m.kind === 'labor')
+    if (!laborRows.some((m) => m.spec === cutSpec)) fail('加工费未独立成组（labor）')
+    else ev.push(`加工费独立分组「加工费」共 ${laborRows.length} 项，未并入胶与配件 ✓`)
+    if (assertBomSum(noLedBom).ok === false) fail('PVC 方案合计断言失败')
+
+    // ④ 包边条仅描边字：实体字不计；全部描边时按描边周长×1.05
+    if (findRow(ledBom, trimSpec)) fail('实体字不应计包边条')
+    else ev.push('实体字：不计包边条 ✓')
+    const pOutline = makeProject('acc11c', '广告招牌制作', 300)
+    pOutline.layout.items.forEach((it) => (it.mode = 'outline'))
+    const layO: LayoutResult = computeLayout(pOutline.layout, { autoSize: true })
+    const oBom = buildBom(pOutline, layO, preset)
+    const trim = oBom.materials.find((m) => m.spec === trimSpec)
+    const expectTrim = +(oBom.outlinePerimeterM * 1.05).toFixed(6)
+    if (!trim || Math.abs(trim.qty - expectTrim) > 1e-6) fail(`描边字应计包边条 ${expectTrim} 米，实得 ${trim?.qty ?? '无'}`)
+    else ev.push(`描边字：包边条按描边周长 ${oBom.outlinePerimeterM.toFixed(3)}m × 1.05 = ${trim.qty} 米 ✓`)
+
+    // ⑤ 起订量：系数为 0 时无起订量→不计；有起订量→按起订量
+    const trimRule = JSON.parse(JSON.stringify(preset.consumables.find((c) => c.id === 'trim')!.rule))
+    const zeroRule = { ...trimRule, value: 0, minQty: 0 }
+    const zero = ruleQuantity(zeroRule, '米', { areaM2: 0, chars: 9, perimeterM: 9, psu: 1, modules: 9, blocks: 9, outlinePerimeterM: 9 })
+    const minRule = { ...trimRule, value: 0, minQty: 2 }
+    const withMin = ruleQuantity(minRule, '米', { areaM2: 0, chars: 9, perimeterM: 9, psu: 1, modules: 9, blocks: 9, outlinePerimeterM: 9 })
+    if (zero !== 0 || withMin !== 2) fail(`系数为 0 时：无起订量应得 0（实得 ${zero}），起订量 2 应得 2（实得 ${withMin}）`)
+    else ev.push('系数为 0：无起订量→0（不计）；起订量 2→按 2 计 ✓')
+
+    // ⑥ Σ 分项金额 = 合计（整数分）
+    const sum = assertBomSum(ledBom)
+    if (!sum.ok) fail(sum.message)
+    else ev.push(`${sum.message} ✓`)
+
+    checks.push({
+      id: 'A11',
+      title: '材料清单：各项按自身计量口径取值、整件向上取整无小数件、起订量/零系数规则、不发光剔除 LED 两项、包边条仅描边字、加工费独立分组、Σ 分项 = 合计',
+      pass,
+      detail: pass ? '通过' : '未通过',
+      evidence: ev
     })
   }
 

@@ -6,10 +6,10 @@
  */
 
 import type { BomResult, CompareRow } from './materials'
-import { yuan } from './materials'
+import { formatQty, isPieceUnit, yuan } from './materials'
 import type { LayoutResult } from './layout'
 import { alignLabel, mountingLabel } from './layout'
-import type { Project } from './types'
+import type { Material, Project } from './types'
 
 export function bomGroupLabel(kind: string): string {
   switch (kind) {
@@ -24,6 +24,18 @@ export function bomGroupLabel(kind: string): string {
     default:
       return '加工费'
   }
+}
+
+/** 按类别分组（保持明细顺序）：同一类别的条目归为一组，类别名只显示一次 */
+export function bomGroups(materials: Material[]): Array<{ label: string; rows: Material[] }> {
+  const groups: Array<{ label: string; rows: Material[] }> = []
+  for (const m of materials) {
+    const label = bomGroupLabel(m.kind)
+    const last = groups[groups.length - 1]
+    if (last && last.label === label) last.rows.push(m)
+    else groups.push({ label, rows: [m] })
+  }
+  return groups
 }
 
 export interface QuoteDoc {
@@ -44,14 +56,17 @@ export function buildQuoteDoc(project: Project, layout: LayoutResult, bom: BomRe
   const now = new Date()
   const valid = new Date(now.getTime() + 30 * 24 * 3600 * 1000)
   const fmt = (d: Date): string => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  const rows = bom.materials.map((m) => ({
-    group: bomGroupLabel(m.kind),
-    spec: m.spec,
-    qty: String(m.qty),
-    unit: m.unit,
-    unitPrice: yuan(m.unitPriceCents),
-    amount: yuan(m.amountCents)
-  }))
+  const groups = bomGroups(bom.materials)
+  const rows = groups.flatMap((g) =>
+    g.rows.map((m, i) => ({
+      group: i === 0 ? g.label : '',
+      spec: m.spec,
+      qty: formatQty(m.qty, isPieceUnit(m.unit)),
+      unit: m.unit,
+      unitPrice: yuan(m.unitPriceCents),
+      amount: yuan(m.amountCents)
+    }))
+  )
   return {
     title: '招牌字制作报价单',
     projectName: project.name,
@@ -67,8 +82,14 @@ export function buildQuoteDoc(project: Project, layout: LayoutResult, bom: BomRe
     notes: [
       `面板材料：${bom.panelMaterial.name}（${bom.panelMaterial.desc}）`,
       `亚克力拼版：${bom.nesting.sheetCount} 张 ${bom.sheet.spec}，利用率 ${(bom.nesting.utilization * 100).toFixed(1)}%`,
-      `LED：布点长度 ${bom.led.perimeterTotalMm}mm，模组 ${bom.led.modules} 只，额定功率 ${bom.led.ratedW}W，建议电源 ${bom.led.suggestedPsu}`,
-      bom.led.note
+      // 不发光方案无 LED 与电源，不列布点说明
+      ...(bom.panelMaterial.useLed
+        ? [
+            `LED：布点长度 ${bom.led.perimeterTotalMm}mm，模组 ${bom.led.modules} 只，额定功率 ${bom.led.ratedW}W，建议电源 ${bom.led.suggestedPsu}`,
+            bom.led.note
+          ]
+        : []),
+      '用量口径：按面积/周长/模组/笔画块/描边周长计量的项目按实际用量折算；单位为支、套、个、台等整件采购的项目向上取整，不出小数件；不足起订量按起订量计，用量为 0 且无起订量的项目不计。'
     ].filter((s) => !!s),
     footer: '本报价基于当前材料单价，有效期 30 天；含材料与加工费，不含安装与运输。'
   }
@@ -149,12 +170,16 @@ export function exportProcessCardCsv(project: Project, layout: LayoutResult, bom
   lines.push('料件,宽mm,高mm,数量')
   for (const c of bom.cutList) lines.push([c.label, c.wMm, c.hMm, c.count].join(','))
   lines.push('')
-  lines.push('LED 与电源')
-  lines.push(`布点长度mm,${bom.led.perimeterTotalMm}`)
-  lines.push(`模组数,${bom.led.modules}`)
-  lines.push(`额定功率W,${bom.led.ratedW}`)
-  lines.push(`建议电源,${bom.led.suggestedPsu}`)
-  lines.push(`说明,${bom.led.note}`)
+  if (bom.panelMaterial.useLed) {
+    lines.push('LED 与电源')
+    lines.push(`布点长度mm,${bom.led.perimeterTotalMm}`)
+    lines.push(`模组数,${bom.led.modules}`)
+    lines.push(`额定功率W,${bom.led.ratedW}`)
+    lines.push(`建议电源,${bom.led.suggestedPsu}`)
+    lines.push(`说明,${bom.led.note}`)
+  } else {
+    lines.push(`LED 与电源,不发光材质（${bom.panelMaterial.name}）不计`)
+  }
   lines.push('')
   lines.push('亚克力拼版')
   lines.push(`板材,${bom.sheet.spec}`)

@@ -4,8 +4,8 @@ import { useRoute } from 'vue-router'
 import SheetDiagram from '../components/SheetDiagram.vue'
 import { findFont } from '../logic/fontLoader'
 import { alignLabel } from '../logic/layout'
-import { assertBomSum, buildBom, compareMaterials, yuan } from '../logic/materials'
-import { bomGroupLabel, exportProcessCardCsv } from '../logic/quote'
+import { assertBomSum, buildBom, compareMaterials, formatQty, isPieceUnit, yuan } from '../logic/materials'
+import { bomGroups, exportProcessCardCsv } from '../logic/quote'
 import { getProject } from '../logic/store'
 import { useSession } from '../logic/useSession'
 import type { Project } from '../logic/types'
@@ -24,11 +24,7 @@ const compare = computed(() =>
   project.value && layout.value && bom.value ? compareMaterials(project.value, layout.value, preset.value, bom.value) : []
 )
 
-const grouped = computed(() => {
-  const b = bom.value
-  if (!b) return []
-  return [{ label: bomGroupLabel(b.materials[0]?.kind ?? 'glue'), rows: b.materials }]
-})
+const grouped = computed(() => (bom.value ? bomGroups(bom.value.materials) : []))
 
 function applySheet(id: string): void {
   if (project.value) project.value.sheetId = id
@@ -111,8 +107,13 @@ function processCard(): void {
           <div class="card">
             <header>
               <h2>材料明细与金额</h2>
-              <span class="hint">金额单位「分」，Σ 明细 = 合计</span>
+              <span class="hint">金额单位「分」，Σ 明细 = 合计；按类别分组，类别名每组只写一次</span>
             </header>
+            <p class="muted" style="margin: 0 0 8px">
+              计量口径：按面积（㎡）、周长/布点长度（米）、模组、笔画块、描边周长计量的项目按各自基数 ×
+              系数折算；单位为 <b>支 / 套 / 个 / 台</b> 等整件采购的项目数量<b>向上取整</b>，不出现小数件。毛用量不足起订量（minQty）时按起订量计；系数为
+              0 或用量为 0 且无起订量的项目不计入明细。包边条仅描边/镂空字计；不发光材质不计 LED 布点安装与电源装配。
+            </p>
             <table>
               <thead>
                 <tr>
@@ -127,9 +128,9 @@ function processCard(): void {
               <tbody>
                 <template v-for="g in grouped" :key="g.label">
                   <tr v-for="(m, i) in g.rows" :key="`${g.label}${i}`">
-                    <td>{{ i === 0 ? g.label : '' }}</td>
+                    <td v-if="i === 0" :rowspan="g.rows.length" class="group-cell">{{ g.label }}</td>
                     <td>{{ m.spec }}</td>
-                    <td class="num">{{ m.qty }}</td>
+                    <td class="num">{{ formatQty(m.qty, isPieceUnit(m.unit)) }}</td>
                     <td>{{ m.unit }}</td>
                     <td class="num">{{ yuan(m.unitPriceCents) }}</td>
                     <td class="num">{{ yuan(m.amountCents) }}</td>

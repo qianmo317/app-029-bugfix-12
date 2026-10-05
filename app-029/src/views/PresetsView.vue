@@ -12,6 +12,28 @@ const running = ref(false)
 
 const dirty = computed(() => JSON.stringify(preset.value) !== JSON.stringify(loadPreset()))
 
+/** 用量规则计量口径中文说明（与 materials.ts 中 rawRuleQty 一一对应） */
+function ruleLabel(type: string): string {
+  switch (type) {
+    case 'perPieceAreaM2':
+      return '按料件面积（㎡）'
+    case 'perChar':
+      return '按字数（每字）'
+    case 'perMeterPerimeter':
+      return '按外轮廓周长（米）'
+    case 'perPsu':
+      return '按电源台数'
+    case 'perModule':
+      return '按 LED 模组数'
+    case 'perStrokeBlock':
+      return '按笔画块数'
+    case 'perOutlinePerimeter':
+      return '按描边周长（米，仅描边字）'
+    default:
+      return type
+  }
+}
+
 function save(): void {
   savePreset(preset.value)
   saved.value = `已保存（${new Date().toLocaleTimeString('zh-CN')}）`
@@ -157,9 +179,13 @@ function removeSheet(i: number): void {
         </div>
 
         <h3 style="margin-top: 14px">胶与配件</h3>
+        <p class="muted">
+          毛用量 = 计量基数 × 用量系数；不足起订量时按起订量计；系数为 0 或毛用量为 0 且无起订量 → 不计。单位为
+          支/套/个/台等整件采购的项目数量向上取整（金额按件数计），米/㎡ 等折算单位保留小数（金额按真实用量计）。
+        </p>
         <table>
           <thead>
-            <tr><th>名称</th><th class="num">单价（分）</th><th>单位</th><th class="num">用量系数</th><th>计量口径</th></tr>
+            <tr><th>名称</th><th class="num">单价（分）</th><th>单位</th><th class="num">用量系数</th><th class="num">起订量</th><th>计量口径</th></tr>
           </thead>
           <tbody>
             <tr v-for="c in preset.consumables" :key="c.id">
@@ -167,15 +193,20 @@ function removeSheet(i: number): void {
               <td class="num"><input type="number" v-model.number="c.unitPriceCents" step="10" style="width: 80px" /></td>
               <td><input type="text" v-model="c.unit" style="width: 44px" /></td>
               <td class="num"><input type="number" v-model.number="c.rule.value" step="0.005" style="width: 78px" /></td>
-              <td class="muted mono">{{ c.rule.type }}</td>
+              <td class="num"><input type="number" v-model.number="c.rule.minQty" min="0" step="1" style="width: 60px" /></td>
+              <td class="muted mono">{{ ruleLabel(c.rule.type) }}</td>
             </tr>
           </tbody>
         </table>
 
         <h3 style="margin-top: 14px">加工费</h3>
+        <p class="muted">
+          加工费单列分组，不并入胶与配件；其中「LED 布点安装」「电源装配」仅发光材质计，不发光材质自动剔除；
+          整件单位（台等）同样向上取整。
+        </p>
         <table>
           <thead>
-            <tr><th>项目</th><th class="num">单价（分）</th><th>单位</th><th class="num">系数</th><th>计量口径</th></tr>
+            <tr><th>项目</th><th class="num">单价（分）</th><th>单位</th><th class="num">系数</th><th class="num">起订量</th><th>计量口径</th></tr>
           </thead>
           <tbody>
             <tr v-for="l in preset.labor" :key="l.id">
@@ -183,7 +214,8 @@ function removeSheet(i: number): void {
               <td class="num"><input type="number" v-model.number="l.unitPriceCents" step="100" style="width: 84px" /></td>
               <td><input type="text" v-model="l.unit" style="width: 44px" /></td>
               <td class="num"><input type="number" v-model.number="l.rule.value" step="0.05" style="width: 70px" /></td>
-              <td class="muted mono">{{ l.rule.type }}</td>
+              <td class="num"><input type="number" v-model.number="l.rule.minQty" min="0" step="1" style="width: 60px" /></td>
+              <td class="muted mono">{{ ruleLabel(l.rule.type) }}</td>
             </tr>
           </tbody>
         </table>
