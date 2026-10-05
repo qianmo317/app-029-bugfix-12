@@ -43,6 +43,8 @@ export interface ConsumableSpec {
   unit: string
   unitPriceCents: number
   rule: RuleSpec
+  /** 是否仅发光材质才计（如电源线）；非发光材质跳过 */
+  ledOnly?: boolean
 }
 
 export interface LaborSpec {
@@ -51,6 +53,8 @@ export interface LaborSpec {
   unit: string
   unitPriceCents: number
   rule: RuleSpec
+  /** 是否仅发光材质才计（LED 布点安装、电源装配）；非发光材质跳过 */
+  ledOnly?: boolean
 }
 
 export interface PanelMaterialSpec {
@@ -107,8 +111,85 @@ export interface BomOptions {
   acknowledgeThinStroke?: boolean
 }
 
-function ruleQty(rule: RuleSpec, ctx: { areaM2: number; chars: number; perimeterM: number; psu: number; modules: number; blocks: number; outlinePerimeterM: number }): number {
-  return Math.max(rule.minQty, ctx.chars * rule.value)
+/** 按件计的计量单位：只能整件采购，用量必须向上取整（不允许 0.几 支/套/个/台） */
+const DISCRETE_UNITS = new Set(['支', '套', '个', '台'])
+
+/** 计量口径（每条规则各按自己的基数取值，不能一律跟字数走） */
+type RuleCtx = {
+  /** 料件面积（㎡，拼版料件外接矩形之和） */
+  areaM2: number
+  /** 字数（有效非空字符数） */
+  chars: number
+  /** 外轮廓周长（m，全部字符） */
+  perimeterM: number
+  /** 电源台数 */
+  psu: number
+  /** LED 模组只数 */
+  modules: number
+  /** 笔画块（连通域）总数 */
+  blocks: number
+  /** 描边字外轮廓周长（m，仅 mode='outline' 的字） */
+  outlinePerimeterM: number
+}
+
+/**
+ * 按规则类型取原始用量（保留小数）：
+ * perPieceAreaM2 按面积、perChar 按字、perMeterPerimeter 按周长、
+ * perPsu 按电源台数、perModule 按模组只数、perStrokeBlock 按笔画块、
+ * perOutlinePerimeter 按描边周长。
+ */
+function rawRuleQty(rule: RuleSpec, ctx: RuleCtx): number {
+  const v = rule.value
+  switch (rule.type) {
+    case 'perPieceAreaM2':
+      return ctx.areaM2 * v
+    case 'perChar':
+      return ctx.chars * v
+    case 'perMeterPerimeter':
+      return ctx.perimeterM * v
+    case 'perPsu':
+      return ctx.psu * v
+    case 'perModule':
+      return ctx.modules * v
+    case 'perStrokeBlock':
+      return ctx.blocks * v
+    case 'perOutlinePerimeter':
+      return ctx.outlinePerimeterM * v
+  }
+}
+
+/**
+ * 取最终用量：
+ * 1. 原始用量 = 计量基数 × 系数（系数为 0 时原始用量即 0）；
+ * 2. 起订量：再与 minQty 取大（起订量保底，原始用量为 0 但有起订量时按起订量计）；
+ * 3. 按支/套/个/台计的整件采购：向上取整，不出现小数件数；
+ *    其余单位（米/㎡/字…）按用量折算，保留 2 位小数；
+ * 4. 用量（含起订量）为 0 时返回 0，由调用方跳过该条，不进明细。
+ */
+function resolveQty(rule: RuleSpec, unit: string, ctx: RuleCtx): number {
+  const base = Math.max(rawRuleQty(rule, ctx), rule.minQty)
+  if (base <= 0) return 0
+  if (DISCRETE_UNITS.has(unit)) {
+    // 减去微小容差，避免浮点误差把整数顶高一整件
+    return Math.ceil(base - 1e-9)
+  }
+  return Math.round(base * 100) / 100
+}
+
+/** 按类别（kind）保序分组：同一类的明细归到一组，组名只显示一次 */
+export function groupByKind<T extends { kind: string }>(rows: T[]): { kind: string; rows: T[] }[] {
+  const order: string[] = []
+  const map = new Map<string, T[]>()
+  for (const r of rows) {
+    let g = map.get(r.kind)
+    if (!g) {
+      g = []
+      map.set(r.kind, g)
+      order.push(r.kind)
+    }
+    g.push(r)
+  }
+  return order.map((kind) => ({ kind, rows: map.get(kind) as T[] }))
 }
 
 /** 拆料件：每个连通域（笔画块）一件，按外接矩形计 */
@@ -190,13 +271,20 @@ export function buildBom(project: Project, layout: LayoutResult, preset: Preset,
       amountCents: led.psuCount * psuUnitPrice
     })
   }
-  // 4) 胶与配件与加工费
-  for (const c of [...preset.consumables, ...preset.labor]) {
-    if (c.id === 'trim') continue
-    const qty = Math.round(ruleQty(c.rule, ctx) * 100) / 100
-    if (qty <= 0) continue
+  // 4) 胶与配件、加工费（每项各按自身规则的计量口径取用量）
+  const chargeables: Array<{ spec: ConsumableSpec | LaborSpec; isLabor: boolean }> = [
+    ...preset.consumables.map((c) => ({ spec: c, isLabor: false })),
+    ...preset.labor.map((c) => ({ spec: c, isLabor: true }))
+  ]
+  for (const { spec: c, isLabor } of chargeables) {
+    // 是否仅发光材质才计：优先取当前预设条目上的标记；兼容旧版本地保存的预设（无此字段）时回落到内置默认值
+    const defs = isLabor ? materialsData.labor : materialsData.consumables
+    const ledOnly = c.ledOnly ?? defs.find((d) => d.id === c.id)?.ledOnly ?? false
+    if (ledOnly && !panelMaterial.useLed) continue
+    const qty = resolveQty(c.rule, c.unit, ctx)
+    if (qty <= 0) continue // 用量为 0 且无起订量：不进明细
     materials.push({
-      kind: 'glue',
+      kind: isLabor ? 'labor' : 'glue',
       spec: c.spec,
       qty,
       unit: c.unit,

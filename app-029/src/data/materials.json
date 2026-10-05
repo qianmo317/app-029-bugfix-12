@@ -98,6 +98,7 @@
       "spec": "电源线 RVV 2×1.0mm²（按布点长度 0.35m/m）",
       "unit": "米",
       "unitPriceCents": 320,
+      "ledOnly": true,
       "rule": { "type": "perMeterPerimeter", "value": 0.35, "minQty": 0 }
     },
     {
@@ -128,6 +129,7 @@
       "spec": "LED 布点安装（打孔/贴片/走线）",
       "unit": "米",
       "unitPriceCents": 1500,
+      "ledOnly": true,
       "rule": { "type": "perMeterPerimeter", "value": 1, "minQty": 0 }
     },
     {
@@ -142,6 +144,7 @@
       "spec": "电源装配与通电老化测试",
       "unit": "台",
       "unitPriceCents": 4000,
+      "ledOnly": true,
       "rule": { "type": "perPsu", "value": 1, "minQty": 0 }
     }
   ],

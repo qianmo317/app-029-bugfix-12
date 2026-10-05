@@ -6,7 +6,7 @@
  */
 
 import type { BomResult, CompareRow } from './materials'
-import { yuan } from './materials'
+import { groupByKind, yuan } from './materials'
 import type { LayoutResult } from './layout'
 import { alignLabel, mountingLabel } from './layout'
 import type { Project } from './types'
@@ -26,6 +26,16 @@ export function bomGroupLabel(kind: string): string {
   }
 }
 
+export interface QuoteRow {
+  kind: string
+  group: string
+  spec: string
+  qty: string
+  unit: string
+  unitPrice: string
+  amount: string
+}
+
 export interface QuoteDoc {
   title: string
   projectName: string
@@ -34,7 +44,9 @@ export interface QuoteDoc {
   panelText: string
   fontText: string
   layoutText: string
-  rows: Array<{ group: string; spec: string; qty: string; unit: string; unitPrice: string; amount: string }>
+  /** 按类别分组的明细行（每类一组，组名在组内首行） */
+  groups: Array<{ kind: string; label: string; rows: QuoteRow[] }>
+  rows: QuoteRow[]
   total: string
   notes: string[]
   footer: string
@@ -44,14 +56,17 @@ export function buildQuoteDoc(project: Project, layout: LayoutResult, bom: BomRe
   const now = new Date()
   const valid = new Date(now.getTime() + 30 * 24 * 3600 * 1000)
   const fmt = (d: Date): string => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  const rows = bom.materials.map((m) => ({
+  const toRow = (m: BomResult['materials'][number]): QuoteRow => ({
+    kind: m.kind,
     group: bomGroupLabel(m.kind),
     spec: m.spec,
     qty: String(m.qty),
     unit: m.unit,
     unitPrice: yuan(m.unitPriceCents),
     amount: yuan(m.amountCents)
-  }))
+  })
+  const rows = bom.materials.map(toRow)
+  const groups = groupByKind(rows).map((g) => ({ kind: g.kind, label: bomGroupLabel(g.kind), rows: g.rows }))
   return {
     title: '招牌字制作报价单',
     projectName: project.name,
@@ -63,12 +78,14 @@ export function buildQuoteDoc(project: Project, layout: LayoutResult, bom: BomRe
     fontText: `${fontLabel}　字重 ${project.layout.settings.weight}　字号 ${layout.sizeMm}mm（${alignLabel(project.layout.settings.align)}）`,
     layoutText: `占宽 ${layout.occupiedW}mm × 占高 ${layout.occupiedH}mm；左右留边 ${layout.margins.left}/${layout.margins.right}mm；视觉间距极差 ${layout.gapSpread}mm`,
     rows,
+    groups,
     total: yuan(bom.totalCents),
     notes: [
       `面板材料：${bom.panelMaterial.name}（${bom.panelMaterial.desc}）`,
       `亚克力拼版：${bom.nesting.sheetCount} 张 ${bom.sheet.spec}，利用率 ${(bom.nesting.utilization * 100).toFixed(1)}%`,
-      `LED：布点长度 ${bom.led.perimeterTotalMm}mm，模组 ${bom.led.modules} 只，额定功率 ${bom.led.ratedW}W，建议电源 ${bom.led.suggestedPsu}`,
-      bom.led.note
+      ...(bom.panelMaterial.useLed
+        ? [`LED：布点长度 ${bom.led.perimeterTotalMm}mm，模组 ${bom.led.modules} 只，额定功率 ${bom.led.ratedW}W，建议电源 ${bom.led.suggestedPsu}`, bom.led.note]
+        : [])
     ].filter((s) => !!s),
     footer: '本报价基于当前材料单价，有效期 30 天；含材料与加工费，不含安装与运输。'
   }
@@ -100,12 +117,17 @@ export function exportQuoteXls(project: Project, layout: LayoutResult, bom: BomR
     <tr><td>字体/排版</td><td colspan="5">${esc(doc.fontText)}</td></tr>
     <tr><td>排版结果</td><td colspan="5">${esc(doc.layoutText)}</td></tr>
     <tr><th>类别</th><th>规格/说明</th><th>数量</th><th>单位</th><th>单价(元)</th><th>金额(元)</th></tr>
-    ${doc.rows
+    ${doc.groups
       .map(
-        (r) =>
-          `<tr><td>${esc(r.group)}</td><td>${esc(r.spec)}</td><td>${esc(r.qty)}</td><td>${esc(r.unit)}</td><td>${esc(
-            r.unitPrice
-          )}</td><td>${esc(r.amount)}</td></tr>`
+        (g) =>
+          g.rows
+            .map(
+              (r, i) =>
+                `<tr><td>${i === 0 ? esc(g.label) : ''}</td><td>${esc(r.spec)}</td><td>${esc(r.qty)}</td><td>${esc(
+                  r.unit
+                )}</td><td>${esc(r.unitPrice)}</td><td>${esc(r.amount)}</td></tr>`
+            )
+            .join('\n')
       )
       .join('\n')}
     <tr><td colspan="5">合计</td><td>${esc(doc.total)}</td></tr>

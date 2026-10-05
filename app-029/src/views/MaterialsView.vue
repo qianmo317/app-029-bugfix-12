@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 import SheetDiagram from '../components/SheetDiagram.vue'
 import { findFont } from '../logic/fontLoader'
 import { alignLabel } from '../logic/layout'
-import { assertBomSum, buildBom, compareMaterials, yuan } from '../logic/materials'
+import { assertBomSum, buildBom, compareMaterials, groupByKind, yuan } from '../logic/materials'
 import { bomGroupLabel, exportProcessCardCsv } from '../logic/quote'
 import { getProject } from '../logic/store'
 import { useSession } from '../logic/useSession'
@@ -27,7 +27,7 @@ const compare = computed(() =>
 const grouped = computed(() => {
   const b = bom.value
   if (!b) return []
-  return [{ label: bomGroupLabel(b.materials[0]?.kind ?? 'glue'), rows: b.materials }]
+  return groupByKind(b.materials).map((g) => ({ kind: g.kind, label: bomGroupLabel(g.kind), rows: g.rows }))
 })
 
 function applySheet(id: string): void {

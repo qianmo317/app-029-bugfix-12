@@ -112,14 +112,16 @@ function toCsv(): void {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(r, i) in doc.rows" :key="i">
-                <td>{{ r.group }}</td>
-                <td>{{ r.spec }}</td>
-                <td class="num">{{ r.qty }}</td>
-                <td>{{ r.unit }}</td>
-                <td class="num">{{ r.unitPrice }}</td>
-                <td class="num">{{ r.amount }}</td>
-              </tr>
+              <template v-for="g in doc.groups" :key="g.kind">
+                <tr v-for="(r, i) in g.rows" :key="`${g.kind}-${i}`">
+                  <td>{{ i === 0 ? g.label : '' }}</td>
+                  <td>{{ r.spec }}</td>
+                  <td class="num">{{ r.qty }}</td>
+                  <td>{{ r.unit }}</td>
+                  <td class="num">{{ r.unitPrice }}</td>
+                  <td class="num">{{ r.amount }}</td>
+                </tr>
+              </template>
             </tbody>
             <tfoot>
               <tr>
